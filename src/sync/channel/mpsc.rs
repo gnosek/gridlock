@@ -22,6 +22,7 @@
 use crate::observer::{DefaultObserver, Id, Resource, ResourceObserver, observer};
 use std::future::Future;
 use std::panic::Location;
+use std::time::Duration;
 
 /// Create a bounded mpsc channel using the crate-wide default observer.
 #[track_caller]
@@ -104,12 +105,193 @@ impl<T, O: ResourceObserver> Sender<T, O> {
             result
         }
     }
+
+    /// Send a value with a timeout.
+    #[track_caller]
+    pub fn send_timeout(
+        &self,
+        value: T,
+        timeout: Duration,
+    ) -> impl Future<
+        Output = Result<(), tokio::sync::mpsc::error::SendTimeoutError<T>>,
+    > + '_ {
+        let caller = Location::caller();
+        async move {
+            let id = Resource::Channel(self.id);
+            self.observer.on_waiting(&id, caller);
+            let result = self.inner.send_timeout(value, timeout).await;
+            if result.is_ok() {
+                self.observer.on_acquired(&id, caller);
+                self.observer.on_released(&id, caller);
+            }
+            result
+        }
+    }
+
     /// Try to send without blocking (not instrumented for lockdep since it never waits).
     pub fn try_send(&self, value: T) -> Result<(), tokio::sync::mpsc::error::TrySendError<T>> {
         self.inner.try_send(value)
     }
 
-    /// Get the resource id
+    /// Blocking send — panics if called from an async context.
+    #[track_caller]
+    pub fn blocking_send(
+        &self,
+        value: T,
+    ) -> Result<(), tokio::sync::mpsc::error::SendError<T>> {
+        let caller = Location::caller();
+        let id = Resource::Channel(self.id);
+        self.observer.on_waiting(&id, caller);
+        let result = self.inner.blocking_send(value);
+        if result.is_ok() {
+            self.observer.on_acquired(&id, caller);
+            self.observer.on_released(&id, caller);
+        }
+        result
+    }
+
+    /// Wait until the receiver half is closed.
+    pub fn closed(&self) -> impl Future<Output = ()> + '_ {
+        self.inner.closed()
+    }
+
+    /// Returns `true` if the receiver has been dropped.
+    pub fn is_closed(&self) -> bool {
+        self.inner.is_closed()
+    }
+
+    /// Reserve capacity for a single message.
+    #[track_caller]
+    pub fn reserve(
+        &self,
+    ) -> impl Future<Output = Result<tokio::sync::mpsc::Permit<'_, T>, tokio::sync::mpsc::error::SendError<()>>>
+           + '_ {
+        let caller = Location::caller();
+        async move {
+            let id = Resource::Channel(self.id);
+            self.observer.on_waiting(&id, caller);
+            let result = self.inner.reserve().await;
+            if result.is_ok() {
+                self.observer.on_acquired(&id, caller);
+                // Note: the Permit itself will send + release when used.
+            }
+            result
+        }
+    }
+
+    /// Reserve capacity for `n` messages.
+    #[track_caller]
+    pub fn reserve_many(
+        &self,
+        n: usize,
+    ) -> impl Future<
+        Output = Result<
+            tokio::sync::mpsc::PermitIterator<'_, T>,
+            tokio::sync::mpsc::error::SendError<()>,
+        >,
+    > + '_ {
+        let caller = Location::caller();
+        async move {
+            let id = Resource::Channel(self.id);
+            self.observer.on_waiting(&id, caller);
+            let result = self.inner.reserve_many(n).await;
+            if result.is_ok() {
+                self.observer.on_acquired(&id, caller);
+            }
+            result
+        }
+    }
+
+    /// Try to reserve capacity for a single message without waiting.
+    pub fn try_reserve(
+        &self,
+    ) -> Result<tokio::sync::mpsc::Permit<'_, T>, tokio::sync::mpsc::error::TrySendError<()>>
+    {
+        self.inner.try_reserve()
+    }
+
+    /// Try to reserve capacity for `n` messages without waiting.
+    pub fn try_reserve_many(
+        &self,
+        n: usize,
+    ) -> Result<
+        tokio::sync::mpsc::PermitIterator<'_, T>,
+        tokio::sync::mpsc::error::TrySendError<()>,
+    > {
+        self.inner.try_reserve_many(n)
+    }
+
+    /// Reserve an owned slot in the channel.
+    pub fn reserve_owned(
+        self,
+    ) -> impl Future<
+        Output = Result<
+            tokio::sync::mpsc::OwnedPermit<T>,
+            tokio::sync::mpsc::error::SendError<()>,
+        >,
+    > {
+        // We pass through the inner sender directly — observer hooks
+        // were already applied at send time.
+        self.inner.reserve_owned()
+    }
+
+    /// Try to reserve an owned slot without waiting.
+    pub fn try_reserve_owned(
+        self,
+    ) -> Result<
+        tokio::sync::mpsc::OwnedPermit<T>,
+        tokio::sync::mpsc::error::TrySendError<Self>,
+    > {
+        match self.inner.try_reserve_owned() {
+            Ok(permit) => Ok(permit),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(inner)) => {
+                Err(tokio::sync::mpsc::error::TrySendError::Full(Sender {
+                    id: self.id,
+                    inner,
+                    observer: self.observer,
+                }))
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(inner)) => {
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(Sender {
+                    id: self.id,
+                    inner,
+                    observer: self.observer,
+                }))
+            }
+        }
+    }
+
+    /// Returns `true` if both senders belong to the same channel.
+    pub fn same_channel(&self, other: &Self) -> bool {
+        self.inner.same_channel(&other.inner)
+    }
+
+    /// Returns the current capacity of the channel.
+    pub fn capacity(&self) -> usize {
+        self.inner.capacity()
+    }
+
+    /// Returns the maximum capacity of the channel.
+    pub fn max_capacity(&self) -> usize {
+        self.inner.max_capacity()
+    }
+
+    /// Downgrade this sender to a weak reference.
+    pub fn downgrade(&self) -> tokio::sync::mpsc::WeakSender<T> {
+        self.inner.downgrade()
+    }
+
+    /// Returns the number of strong senders.
+    pub fn strong_count(&self) -> usize {
+        self.inner.strong_count()
+    }
+
+    /// Returns the number of weak senders.
+    pub fn weak_count(&self) -> usize {
+        self.inner.weak_count()
+    }
+
+    /// Get the resource id.
     pub fn id(&self) -> Id {
         self.id
     }
@@ -148,14 +330,97 @@ impl<T, O: ResourceObserver> Receiver<T, O> {
             let result = self.inner.recv().await;
             if result.is_some() {
                 self.observer.on_acquired(&id, caller);
-                // No on_released: channel stays on the held-lock stack so that
-                // any later resource acquisition records channel -> resource.
             }
             result
         }
     }
 
-    /// Get the resource id
+    /// Receive many values at once, up to `limit`.
+    #[track_caller]
+    pub fn recv_many<'a>(
+        &'a mut self,
+        buffer: &'a mut Vec<T>,
+        limit: usize,
+    ) -> impl Future<Output = usize> + 'a {
+        let caller = Location::caller();
+        async move {
+            let id = Resource::Channel(self.id);
+            self.observer.on_waiting(&id, caller);
+            let count = self.inner.recv_many(buffer, limit).await;
+            if count > 0 {
+                self.observer.on_acquired(&id, caller);
+            }
+            count
+        }
+    }
+
+    /// Try to receive a value without waiting.
+    pub fn try_recv(&mut self) -> Result<T, tokio::sync::mpsc::error::TryRecvError> {
+        self.inner.try_recv()
+    }
+
+    /// Blocking receive — panics if called from an async context.
+    #[track_caller]
+    pub fn blocking_recv(&mut self) -> Option<T> {
+        let caller = Location::caller();
+        let id = Resource::Channel(self.id);
+        self.observer.on_waiting(&id, caller);
+        let result = self.inner.blocking_recv();
+        if result.is_some() {
+            self.observer.on_acquired(&id, caller);
+        }
+        result
+    }
+
+    /// Close the receiving half, preventing further sends.
+    pub fn close(&mut self) {
+        self.inner.close();
+    }
+
+    /// Returns `true` if the channel is closed.
+    pub fn is_closed(&self) -> bool {
+        self.inner.is_closed()
+    }
+
+    /// Returns `true` if the channel is empty.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Returns the number of queued messages.
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Returns the current capacity.
+    pub fn capacity(&self) -> usize {
+        self.inner.capacity()
+    }
+
+    /// Returns the maximum capacity.
+    pub fn max_capacity(&self) -> usize {
+        self.inner.max_capacity()
+    }
+
+    /// Returns the number of strong senders.
+    pub fn sender_strong_count(&self) -> usize {
+        self.inner.sender_strong_count()
+    }
+
+    /// Returns the number of weak senders.
+    pub fn sender_weak_count(&self) -> usize {
+        self.inner.sender_weak_count()
+    }
+
+    /// Polls for the next value (low-level).
+    pub fn poll_recv(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<T>> {
+        self.inner.poll_recv(cx)
+    }
+
+    /// Get the resource id.
     pub fn id(&self) -> Id {
         self.id
     }

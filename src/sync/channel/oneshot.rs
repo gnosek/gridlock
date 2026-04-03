@@ -12,6 +12,7 @@
 //!   in the same task records `oneshot → resource`.
 use crate::observer::lockdep::LockDepObserver;
 use crate::observer::{DefaultObserver, Id, Resource, ResourceObserver, observer};
+use std::future::Future;
 use std::panic::Location;
 
 /// Create an unnamed oneshot channel using the crate-wide default observer.
@@ -89,7 +90,30 @@ impl<T, O: ResourceObserver> Sender<T, O> {
         }
     }
 
-    /// Get the resource id
+    /// Wait until the receiver is closed.
+    pub fn closed(&mut self) -> impl Future<Output = ()> + '_ {
+        let tx = self.inner.as_mut().expect("oneshot sender already consumed");
+        tx.closed()
+    }
+
+    /// Returns `true` if the receiver has been dropped.
+    pub fn is_closed(&self) -> bool {
+        self.inner
+            .as_ref()
+            .map(|tx| tx.is_closed())
+            .unwrap_or(true)
+    }
+
+    /// Poll whether the receiver has been dropped (low-level).
+    pub fn poll_closed(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        let tx = self.inner.as_mut().expect("oneshot sender already consumed");
+        tx.poll_closed(cx)
+    }
+
+    /// Get the resource id.
     pub fn id(&self) -> Id {
         self.id
     }
@@ -142,7 +166,59 @@ impl<T, O: ResourceObserver> Receiver<T, O> {
         }
     }
 
-    /// Get the resource id
+    /// Try to receive a value without waiting.
+    pub fn try_recv(
+        &mut self,
+    ) -> Result<T, tokio::sync::oneshot::error::TryRecvError> {
+        let rx = self
+            .inner
+            .as_mut()
+            .expect("oneshot receiver already consumed");
+        rx.try_recv()
+    }
+
+    /// Blocking receive — panics if called from an async context.
+    #[track_caller]
+    pub fn blocking_recv(
+        mut self,
+    ) -> Result<T, tokio::sync::oneshot::error::RecvError> {
+        let caller = Location::caller();
+        let rx = self
+            .inner
+            .take()
+            .expect("oneshot receiver already consumed");
+        let id = Resource::Oneshot(self.id);
+        self.observer.on_waiting(&id, caller);
+        match rx.blocking_recv() {
+            Ok(value) => {
+                self.observer.on_acquired(&id, caller);
+                Ok(value)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Close the receiving half without receiving the value.
+    pub fn close(&mut self) {
+        if let Some(rx) = self.inner.as_mut() {
+            rx.close();
+        }
+    }
+
+    /// Returns `true` if the channel has been terminated (value sent or dropped).
+    pub fn is_terminated(&self) -> bool {
+        self.inner.is_none()
+    }
+
+    /// Returns `true` if no value has been sent yet.
+    pub fn is_empty(&self) -> bool {
+        self.inner
+            .as_ref()
+            .map(|rx| rx.is_empty())
+            .unwrap_or(true)
+    }
+
+    /// Get the resource id.
     pub fn id(&self) -> Id {
         self.id
     }

@@ -15,6 +15,7 @@
 //!   permanently — any resource acquired later records
 //!   `broadcast → resource`.
 use crate::observer::{DefaultObserver, Id, Resource, ResourceObserver, observer};
+use std::future::Future;
 use std::panic::Location;
 
 /// Create a broadcast channel with an explicit `Id` and the crate-wide default observer.
@@ -86,7 +87,42 @@ impl<T: Clone, O: ResourceObserver> Sender<T, O> {
         }
     }
 
-    /// Get the resource id
+    /// Returns the number of queued messages.
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Returns `true` if the channel is empty.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Returns the number of active receivers.
+    pub fn receiver_count(&self) -> usize {
+        self.inner.receiver_count()
+    }
+
+    /// Returns `true` if both senders belong to the same channel.
+    pub fn same_channel(&self, other: &Self) -> bool {
+        self.inner.same_channel(&other.inner)
+    }
+
+    /// Wait until all receivers have been dropped.
+    pub fn closed(&self) -> impl Future<Output = ()> + '_ {
+        self.inner.closed()
+    }
+
+    /// Returns the number of strong senders.
+    pub fn strong_count(&self) -> usize {
+        self.inner.strong_count()
+    }
+
+    /// Returns the number of weak senders.
+    pub fn weak_count(&self) -> usize {
+        self.inner.weak_count()
+    }
+
+    /// Get the resource id.
     pub fn id(&self) -> Id {
         self.id
     }
@@ -127,5 +163,66 @@ impl<T: Clone, O: ResourceObserver> Receiver<T, O> {
             }
             result
         }
+    }
+
+    /// Try to receive without waiting.
+    pub fn try_recv(&mut self) -> Result<T, tokio::sync::broadcast::error::TryRecvError> {
+        self.inner.try_recv()
+    }
+
+    /// Blocking receive — panics if called from an async context.
+    #[track_caller]
+    pub fn blocking_recv(&mut self) -> Result<T, tokio::sync::broadcast::error::RecvError> {
+        let caller = Location::caller();
+        let id = Resource::Broadcast(self.id);
+        self.observer.on_waiting(&id, caller);
+        let result = self.inner.blocking_recv();
+        if result.is_ok() {
+            self.observer.on_acquired(&id, caller);
+        }
+        result
+    }
+
+    /// Returns the number of queued messages.
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Returns `true` if the channel is empty.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Returns `true` if both receivers belong to the same channel.
+    pub fn same_channel(&self, other: &Self) -> bool {
+        self.inner.same_channel(&other.inner)
+    }
+
+    /// Resubscribe to the broadcast channel (creates a new receiver
+    /// that will only see messages sent after this call).
+    pub fn resubscribe(&self) -> Self
+    where
+        O: Clone,
+    {
+        Receiver {
+            id: self.id,
+            inner: self.inner.resubscribe(),
+            observer: self.observer.clone(),
+        }
+    }
+
+    /// Returns `true` if the sender has been dropped.
+    pub fn is_closed(&self) -> bool {
+        self.inner.is_closed()
+    }
+
+    /// Returns the number of strong senders.
+    pub fn sender_strong_count(&self) -> usize {
+        self.inner.sender_strong_count()
+    }
+
+    /// Returns the number of weak senders.
+    pub fn sender_weak_count(&self) -> usize {
+        self.inner.sender_weak_count()
     }
 }

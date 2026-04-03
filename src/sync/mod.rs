@@ -20,11 +20,13 @@ mod semaphore;
 
 // ── Flat top-level exports (match tokio::sync) ────────────────────────────
 pub use barrier::Barrier;
-pub use mutex::{Mutex, MutexGuard};
+pub use mutex::{Mutex, MutexGuard, OwnedMutexGuard};
 pub use notify::Notify;
-pub use rwlock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+pub use rwlock::{
+    OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
+};
 pub use semaphore::{OwnedSemaphorePermit, Semaphore};
-pub use tokio::sync::{BarrierWaitResult, SemaphorePermit, TryAcquireError};
+pub use tokio::sync::{BarrierWaitResult, SemaphorePermit, TryAcquireError, TryLockError};
 
 // ── Channel family sub-modules (match tokio::sync::mpsc / broadcast / …) ──
 

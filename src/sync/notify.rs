@@ -51,6 +51,10 @@ impl<O: ResourceObserver> Notify<O> {
     pub fn notify_one(&self) {
         self.inner.notify_one();
     }
+    /// Notify the last waiter.
+    pub fn notify_last(&self) {
+        self.inner.notify_last();
+    }
 
     /// Get the resource id
     pub fn id(&self) -> Id {
