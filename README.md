@@ -13,6 +13,36 @@ Every wrapper delegates to the real `tokio::sync` type but calls a pluggable [`R
 
 In **debug** builds both observers are active by default; in **release** builds the observer is `()` and all instrumentation compiles away.
 
+## Requirements
+
+This crate uses tokio APIs that are gated behind the `tokio_unstable` cfg flag
+(e.g. `tokio::task::Builder` for named tasks). You **must** enable it or the
+build will fail.
+
+### Option A — `.cargo/config.toml` (recommended)
+
+Create or edit `.cargo/config.toml` at the workspace root:
+
+```toml
+[build]
+rustflags = ["--cfg", "tokio_unstable"]
+```
+
+This is the approach used by gridlock itself.
+
+### Option B — environment variable
+
+```sh
+export RUSTFLAGS="--cfg tokio_unstable"
+cargo build
+```
+
+Or inline:
+
+```sh
+RUSTFLAGS="--cfg tokio_unstable" cargo build
+```
+
 ## Quick start
 
 Replace `tokio::sync` imports with `gridlock::sync` and spawn tasks with `gridlock::task`:
