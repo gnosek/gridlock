@@ -1,6 +1,6 @@
 [package]
 name = "gridlock"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 readme = "README.md"
 description = "Drop-in instrumented replacements for `tokio::sync` primitives that automatically detect potential deadlocks at runtime."
