@@ -1,0 +1,17 @@
+[package]
+name = "gridlock"
+version = "0.1.0"
+edition = "2024"
+readme = "README.md"
+description = "Drop-in instrumented replacements for `tokio::sync` primitives that automatically detect potential deadlocks at runtime."
+license = "MIT"
+repository = "https://github.com/gnosek/gridlock"
+
+
+[dependencies]
+tokio = { version = "1.50.0", features = ["rt", "sync", "time", "tracing"] }
+tracing = "0.1.44"
+pin-project = "1"
+[dev-dependencies]
+tokio = { version = "1.50.0", features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
