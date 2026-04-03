@@ -1,5 +1,8 @@
 use crate::observer::{DefaultObserver, Id, Resource, ResourceObserver, observer};
+use std::future::Future;
 use std::panic::Location;
+use std::sync::Arc;
+
 /// Instrumented wrapper around [`tokio::sync::Semaphore`].
 ///
 /// `acquire()` reports wait/acquire to the observer. Note: the returned
@@ -11,6 +14,7 @@ pub struct Semaphore<O: ResourceObserver = DefaultObserver> {
     inner: tokio::sync::Semaphore,
     observer: O,
 }
+
 impl Semaphore<DefaultObserver> {
     /// Create a semaphore with the default observer using the call site location.
     #[track_caller]
@@ -32,8 +36,11 @@ impl Semaphore<DefaultObserver> {
         }
     }
 }
+
 impl<O: ResourceObserver> Semaphore<O> {
-    /// Acquire a permit from the semaphore.
+    // ── Borrow-based acquire ────────────────────────────────────────────
+
+    /// Acquire a single permit from the semaphore.
     #[track_caller]
     pub fn acquire(&self) -> impl Future<Output = tokio::sync::SemaphorePermit<'_>> + '_ {
         let caller = Location::caller();
@@ -46,8 +53,269 @@ impl<O: ResourceObserver> Semaphore<O> {
         }
     }
 
-    /// Get the resource id
+    /// Acquire `n` permits from the semaphore.
+    #[track_caller]
+    pub fn acquire_many(
+        &self,
+        n: u32,
+    ) -> impl Future<Output = tokio::sync::SemaphorePermit<'_>> + '_ {
+        let caller = Location::caller();
+        async move {
+            let id = Resource::Semaphore(self.id);
+            self.observer.on_waiting(&id, caller);
+            let permit = self.inner.acquire_many(n).await.unwrap();
+            self.observer.on_acquired(&id, caller);
+            permit
+        }
+    }
+
+    /// Try to acquire a single permit without waiting.
+    #[track_caller]
+    pub fn try_acquire(
+        &self,
+    ) -> Result<tokio::sync::SemaphorePermit<'_>, tokio::sync::TryAcquireError> {
+        let caller = Location::caller();
+        let id = Resource::Semaphore(self.id);
+        self.observer.on_waiting(&id, caller);
+        match self.inner.try_acquire() {
+            Ok(permit) => {
+                self.observer.on_acquired(&id, caller);
+                Ok(permit)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Try to acquire `n` permits without waiting.
+    #[track_caller]
+    pub fn try_acquire_many(
+        &self,
+        n: u32,
+    ) -> Result<tokio::sync::SemaphorePermit<'_>, tokio::sync::TryAcquireError> {
+        let caller = Location::caller();
+        let id = Resource::Semaphore(self.id);
+        self.observer.on_waiting(&id, caller);
+        match self.inner.try_acquire_many(n) {
+            Ok(permit) => {
+                self.observer.on_acquired(&id, caller);
+                Ok(permit)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    // ── Owned acquire ───────────────────────────────────────────────────
+    //
+    // `tokio::sync::Semaphore::acquire_owned` needs `Arc<tokio::sync::Semaphore>`,
+    // but we only have `Arc<Semaphore<O>>` — the inner semaphore is a plain field,
+    // not separately reference-counted.
+    //
+    // Strategy: acquire via the borrow-based API, then **forget** the raw tokio
+    // permit so its Drop doesn't return the permits.  Our own
+    // [`OwnedSemaphorePermit`] keeps the `Arc<Semaphore<O>>` alive and calls
+    // `add_permits` on drop to restore them.
+
+    /// Acquire a single owned permit.
+    #[track_caller]
+    pub fn acquire_owned(
+        self: Arc<Self>,
+    ) -> impl Future<Output = OwnedSemaphorePermit<O>> {
+        let caller = Location::caller();
+        async move {
+            let id = Resource::Semaphore(self.id);
+            self.observer.on_waiting(&id, caller);
+            // Borrow-based acquire — lifetime is tied to `self` which lives
+            // long enough because we hold the Arc for the whole async block.
+            let permit = self.inner.acquire().await.unwrap();
+            self.observer.on_acquired(&id, caller);
+            // Forget the raw permit so its destructor doesn't return the
+            // permit to the semaphore — we'll do that ourselves in
+            // OwnedSemaphorePermit::drop.
+            permit.forget();
+            OwnedSemaphorePermit {
+                semaphore: self,
+                permits: 1,
+            }
+        }
+    }
+
+    /// Acquire `n` owned permits.
+    #[track_caller]
+    pub fn acquire_many_owned(
+        self: Arc<Self>,
+        n: u32,
+    ) -> impl Future<Output = OwnedSemaphorePermit<O>> {
+        let caller = Location::caller();
+        async move {
+            let id = Resource::Semaphore(self.id);
+            self.observer.on_waiting(&id, caller);
+            let permit = self.inner.acquire_many(n).await.unwrap();
+            self.observer.on_acquired(&id, caller);
+            permit.forget();
+            OwnedSemaphorePermit {
+                semaphore: self,
+                permits: n,
+            }
+        }
+    }
+
+    /// Try to acquire a single owned permit without waiting.
+    #[track_caller]
+    pub fn try_acquire_owned(
+        self: Arc<Self>,
+    ) -> Result<OwnedSemaphorePermit<O>, tokio::sync::TryAcquireError> {
+        let caller = Location::caller();
+        let id = Resource::Semaphore(self.id);
+        self.observer.on_waiting(&id, caller);
+        // Acquire and immediately forget the borrow-based permit so the
+        // borrow on `self` is released before we move `self` into the
+        // OwnedSemaphorePermit.
+        let acquired = {
+            match self.inner.try_acquire() {
+                Ok(permit) => {
+                    permit.forget();
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        };
+        match acquired {
+            Ok(()) => {
+                self.observer.on_acquired(&id, caller);
+                Ok(OwnedSemaphorePermit {
+                    semaphore: self,
+                    permits: 1,
+                })
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Try to acquire `n` owned permits without waiting.
+    #[track_caller]
+    pub fn try_acquire_many_owned(
+        self: Arc<Self>,
+        n: u32,
+    ) -> Result<OwnedSemaphorePermit<O>, tokio::sync::TryAcquireError> {
+        let caller = Location::caller();
+        let id = Resource::Semaphore(self.id);
+        self.observer.on_waiting(&id, caller);
+        let acquired = {
+            match self.inner.try_acquire_many(n) {
+                Ok(permit) => {
+                    permit.forget();
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        };
+        match acquired {
+            Ok(()) => {
+                self.observer.on_acquired(&id, caller);
+                Ok(OwnedSemaphorePermit {
+                    semaphore: self,
+                    permits: n,
+                })
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    // ── Passthrough helpers ─────────────────────────────────────────────
+
+    /// Returns the current number of available permits.
+    pub fn available_permits(&self) -> usize {
+        self.inner.available_permits()
+    }
+
+    /// Adds `n` new permits to the semaphore.
+    pub fn add_permits(&self, n: usize) {
+        self.inner.add_permits(n);
+    }
+
+    /// Closes the semaphore.
+    pub fn close(&self) {
+        self.inner.close();
+    }
+
+    /// Returns `true` if the semaphore has been closed.
+    pub fn is_closed(&self) -> bool {
+        self.inner.is_closed()
+    }
+
+    /// Get the resource id.
     pub fn id(&self) -> Id {
         self.id
+    }
+}
+
+// ── Owned permit ────────────────────────────────────────────────────────────
+
+/// An owned permit from a [`Semaphore`].
+///
+/// This is the gridlock equivalent of [`tokio::sync::OwnedSemaphorePermit`].
+/// It keeps the `Arc<Semaphore>` alive and returns the permits when dropped,
+/// without requiring the inner tokio semaphore to be separately
+/// reference-counted.
+pub struct OwnedSemaphorePermit<O: ResourceObserver = DefaultObserver> {
+    semaphore: Arc<Semaphore<O>>,
+    permits: u32,
+}
+
+impl<O: ResourceObserver> OwnedSemaphorePermit<O> {
+    /// Returns a reference to the semaphore that this permit belongs to.
+    pub fn semaphore(&self) -> &Arc<Semaphore<O>> {
+        &self.semaphore
+    }
+
+    /// Returns the number of permits held by this owned permit.
+    pub fn num_permits(&self) -> u32 {
+        self.permits
+    }
+
+    /// Forgets the permit **without** returning it to the semaphore.
+    ///
+    /// This permanently reduces the number of available permits.
+    pub fn forget(self) {
+        let mut this = std::mem::ManuallyDrop::new(self);
+        this.permits = 0; // prevent Drop from adding permits back
+        // ManuallyDrop prevents the destructor from running.
+    }
+
+    /// Merge another permit into this one.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `other` belongs to a different semaphore.
+    pub fn merge(&mut self, other: Self) {
+        assert!(
+            Arc::ptr_eq(&self.semaphore, &other.semaphore),
+            "merging permits from different semaphores"
+        );
+        let other = std::mem::ManuallyDrop::new(other);
+        self.permits += other.permits;
+    }
+
+    /// Split `n` permits off this permit, returning them as a new
+    /// `OwnedSemaphorePermit`.
+    ///
+    /// Returns `None` if this permit holds fewer than `n` permits.
+    pub fn split(&mut self, n: u32) -> Option<OwnedSemaphorePermit<O>> {
+        if n > self.permits {
+            return None;
+        }
+        self.permits -= n;
+        Some(OwnedSemaphorePermit {
+            semaphore: Arc::clone(&self.semaphore),
+            permits: n,
+        })
+    }
+}
+
+impl<O: ResourceObserver> Drop for OwnedSemaphorePermit<O> {
+    fn drop(&mut self) {
+        if self.permits > 0 {
+            self.semaphore.inner.add_permits(self.permits as usize);
+        }
     }
 }

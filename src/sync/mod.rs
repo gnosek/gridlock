@@ -23,8 +23,8 @@ pub use barrier::Barrier;
 pub use mutex::{Mutex, MutexGuard};
 pub use notify::Notify;
 pub use rwlock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-pub use semaphore::Semaphore;
-pub use tokio::sync::{BarrierWaitResult, OwnedSemaphorePermit, SemaphorePermit, TryAcquireError};
+pub use semaphore::{OwnedSemaphorePermit, Semaphore};
+pub use tokio::sync::{BarrierWaitResult, SemaphorePermit, TryAcquireError};
 
 // ── Channel family sub-modules (match tokio::sync::mpsc / broadcast / …) ──
 
