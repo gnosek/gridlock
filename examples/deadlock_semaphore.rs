@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     task::named(
         "task_A",
         instrument(async {
-            let _permit = pool.acquire().await;
+            let _permit = pool.acquire().await.unwrap();
             tracing::info!("task_A: holding pool permit, locking state");
             let mut s = state.lock().await;
             *s += 1;
@@ -45,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         instrument(async {
             let mut s = state.lock().await;
             tracing::info!(state = *s, "task_B: holding state, acquiring pool permit");
-            let _permit = pool.acquire().await;
+            let _permit = pool.acquire().await.unwrap();
             *s += 1;
             tracing::info!(state = *s, "task_B: updated state with permit");
             drop(s);

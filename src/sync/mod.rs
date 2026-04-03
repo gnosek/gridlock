@@ -26,7 +26,7 @@ pub use rwlock::{
     OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
 pub use semaphore::{OwnedSemaphorePermit, Semaphore};
-pub use tokio::sync::{BarrierWaitResult, SemaphorePermit, TryAcquireError, TryLockError};
+pub use tokio::sync::{AcquireError, BarrierWaitResult, SemaphorePermit, TryAcquireError, TryLockError};
 
 // ── Channel family sub-modules (match tokio::sync::mpsc / broadcast / …) ──
 

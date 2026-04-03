@@ -69,7 +69,7 @@ pub fn named_channel<T>(
 ///
 /// `send()` is non-blocking — it replaces the current value and wakes all
 /// receivers.  Immediate acquire + release for tracing.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Sender<T, O: ResourceObserver = DefaultObserver> {
     id: Id,
     inner: tokio::sync::watch::Sender<T>,

@@ -42,14 +42,19 @@ impl<O: ResourceObserver> Semaphore<O> {
 
     /// Acquire a single permit from the semaphore.
     #[track_caller]
-    pub fn acquire(&self) -> impl Future<Output = tokio::sync::SemaphorePermit<'_>> + '_ {
+    pub fn acquire(
+        &self,
+    ) -> impl Future<Output = Result<tokio::sync::SemaphorePermit<'_>, tokio::sync::AcquireError>>
+           + '_ {
         let caller = Location::caller();
         async move {
             let id = Resource::Semaphore(self.id);
             self.observer.on_waiting(&id, caller);
-            let permit = self.inner.acquire().await.unwrap();
-            self.observer.on_acquired(&id, caller);
-            permit
+            let result = self.inner.acquire().await;
+            if result.is_ok() {
+                self.observer.on_acquired(&id, caller);
+            }
+            result
         }
     }
 
@@ -58,14 +63,17 @@ impl<O: ResourceObserver> Semaphore<O> {
     pub fn acquire_many(
         &self,
         n: u32,
-    ) -> impl Future<Output = tokio::sync::SemaphorePermit<'_>> + '_ {
+    ) -> impl Future<Output = Result<tokio::sync::SemaphorePermit<'_>, tokio::sync::AcquireError>>
+           + '_ {
         let caller = Location::caller();
         async move {
             let id = Resource::Semaphore(self.id);
             self.observer.on_waiting(&id, caller);
-            let permit = self.inner.acquire_many(n).await.unwrap();
-            self.observer.on_acquired(&id, caller);
-            permit
+            let result = self.inner.acquire_many(n).await;
+            if result.is_ok() {
+                self.observer.on_acquired(&id, caller);
+            }
+            result
         }
     }
 
@@ -119,22 +127,27 @@ impl<O: ResourceObserver> Semaphore<O> {
     #[track_caller]
     pub fn acquire_owned(
         self: Arc<Self>,
-    ) -> impl Future<Output = OwnedSemaphorePermit<O>> {
+    ) -> impl Future<Output = Result<OwnedSemaphorePermit<O>, tokio::sync::AcquireError>> {
         let caller = Location::caller();
         async move {
             let id = Resource::Semaphore(self.id);
             self.observer.on_waiting(&id, caller);
-            // Borrow-based acquire — lifetime is tied to `self` which lives
-            // long enough because we hold the Arc for the whole async block.
-            let permit = self.inner.acquire().await.unwrap();
-            self.observer.on_acquired(&id, caller);
-            // Forget the raw permit so its destructor doesn't return the
-            // permit to the semaphore — we'll do that ourselves in
-            // OwnedSemaphorePermit::drop.
-            permit.forget();
-            OwnedSemaphorePermit {
-                semaphore: self,
-                permits: 1,
+            let acquired = match self.inner.acquire().await {
+                Ok(permit) => {
+                    permit.forget();
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            };
+            match acquired {
+                Ok(()) => {
+                    self.observer.on_acquired(&id, caller);
+                    Ok(OwnedSemaphorePermit {
+                        semaphore: self,
+                        permits: 1,
+                    })
+                }
+                Err(e) => Err(e),
             }
         }
     }
@@ -144,17 +157,27 @@ impl<O: ResourceObserver> Semaphore<O> {
     pub fn acquire_many_owned(
         self: Arc<Self>,
         n: u32,
-    ) -> impl Future<Output = OwnedSemaphorePermit<O>> {
+    ) -> impl Future<Output = Result<OwnedSemaphorePermit<O>, tokio::sync::AcquireError>> {
         let caller = Location::caller();
         async move {
             let id = Resource::Semaphore(self.id);
             self.observer.on_waiting(&id, caller);
-            let permit = self.inner.acquire_many(n).await.unwrap();
-            self.observer.on_acquired(&id, caller);
-            permit.forget();
-            OwnedSemaphorePermit {
-                semaphore: self,
-                permits: n,
+            let acquired = match self.inner.acquire_many(n).await {
+                Ok(permit) => {
+                    permit.forget();
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            };
+            match acquired {
+                Ok(()) => {
+                    self.observer.on_acquired(&id, caller);
+                    Ok(OwnedSemaphorePermit {
+                        semaphore: self,
+                        permits: n,
+                    })
+                }
+                Err(e) => Err(e),
             }
         }
     }
@@ -233,6 +256,12 @@ impl<O: ResourceObserver> Semaphore<O> {
         self.inner.add_permits(n);
     }
 
+    /// Permanently reduces the number of available permits by at most `n`,
+    /// returning the number actually forgotten.
+    pub fn forget_permits(&self, n: usize) -> usize {
+        self.inner.forget_permits(n)
+    }
+
     /// Closes the semaphore.
     pub fn close(&self) {
         self.inner.close();
@@ -269,8 +298,8 @@ impl<O: ResourceObserver> OwnedSemaphorePermit<O> {
     }
 
     /// Returns the number of permits held by this owned permit.
-    pub fn num_permits(&self) -> u32 {
-        self.permits
+    pub fn num_permits(&self) -> usize {
+        self.permits as usize
     }
 
     /// Forgets the permit **without** returning it to the semaphore.
@@ -278,8 +307,7 @@ impl<O: ResourceObserver> OwnedSemaphorePermit<O> {
     /// This permanently reduces the number of available permits.
     pub fn forget(self) {
         let mut this = std::mem::ManuallyDrop::new(self);
-        this.permits = 0; // prevent Drop from adding permits back
-        // ManuallyDrop prevents the destructor from running.
+        this.permits = 0;
     }
 
     /// Merge another permit into this one.
@@ -300,7 +328,8 @@ impl<O: ResourceObserver> OwnedSemaphorePermit<O> {
     /// `OwnedSemaphorePermit`.
     ///
     /// Returns `None` if this permit holds fewer than `n` permits.
-    pub fn split(&mut self, n: u32) -> Option<OwnedSemaphorePermit<O>> {
+    pub fn split(&mut self, n: usize) -> Option<OwnedSemaphorePermit<O>> {
+        let n = u32::try_from(n).ok()?;
         if n > self.permits {
             return None;
         }
